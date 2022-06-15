@@ -1,0 +1,128 @@
+
+#Requires -Version 7
+<#
+.SYNOPSIS
+    Start or Stop Azure Virtual Machines based on Tag Name and/or Value.
+.DESCRIPTION
+    Use Automation Account with associate Managed Identity to start or stop Azure Virtual Machines based on Tag Name and/or Value.
+    Managed Identity is mandatory and user based recommended.
+    This is to encourage use of user-based managed itendities with least privilege roles assigned.
+    Create a custom role and assign appropriate permissions.
+    Assign a tag to the desired virtual machines and add this runbook to a schedule with the appropriate parameters.
+    The runbook can be associated with as many schedules, webhooks, and tags as required.
+.NOTES
+    It is expected that the Automation Account is assigned per environment for security purposes.
+    For workloads that need to come up in order create a schedule that accounts for the backend to be available.
+
+    Author: Steve Rackham
+    Blog: https://siliconwolf.net
+
+.LINK
+    Specify a URI to a help page, this will show when Get-Help -Online is used.
+.EXAMPLE
+    Start tagged virtual machines at 7am.
+    Assign Tag: StartAt : 7am
+    Associate schedule for recurring event.
+    Set parameters:
+        TagName: StartAt (note: case insensitive.)
+        TagValue: 7am (note: case insensitive.)
+        IdentityID: <Managed Identity Client ID>
+        Action: Stop (note: case insensitive.)
+    Virtual Machines matching the tag name and value will be stopped at the scheduled time.
+.EXAMPLE
+    Stop all development tagged virtual machines at 7pm.
+    Assign Tag: Dev : This VM will stop at 7pm
+    Associate schedule for recurring event.
+    Set parameters:
+        TagName: Dev (note: case insensitive.)
+        TagValue: $Null
+        IdentityID: <Managed Identity Client ID>
+        Action: Stop (note: case insensitive.)
+    Virtual Machines matching the tag name 'Dev' will be stopped at the scheduled time.
+#>
+
+param (
+    [Parameter(
+        HelpMessage = "Threshold to Monitor"
+    )]
+    [int]$Threshold = 30,
+
+    [Parameter(
+        Mandatory,
+        HelpMessage = "The User Managed Identity Client ID with sufficent permissions; recommend a custom role.")]
+    [string]$IdentityID
+
+)
+
+# CONNECTION: #########################################################
+Write-Output "[ START ] ########################################"
+Write-Output "Searching for App Registrations that have certificates or secrets expiring within [ $Threshold ] days..."
+$([Char]13)
+
+Write-Output "[ CONNECTION ]"
+Write-Output "Set Connection Context..."
+Write-Output ("{0}{1}" -f $([Char]9), "Disable Autosave Context...")
+[void](Disable-AzContextAutosave -Scope Process)
+
+Write-Output ("{0}{1}" -f $([Char]9), "Connecting Managed Identity [ $IdentityID ]...")
+$AzureContext = (Connect-AzAccount -Identity -AccountId $IdentityID ).context
+
+Write-Output ("{0}{1}" -f $([Char]9), "Connected. Set and Store Azure Context...")
+$AzureContext = Set-AzContext -SubscriptionName $AzureContext.Subscription -DefaultProfile $AzureContext
+
+# Definitions: ################################################################
+$Threshold = 30
+$Now = Get-Date
+$Threshold = (Get-Date).AddDays($Threshold)
+
+# Collection: -----------------------------------------------------------------
+try {
+    Write-Output "[ App Registrations ]"
+    Write-Output "Searching App Registrations for expiring or expired secrets or certificates..."
+    $Collection = Get-AzureAdApplication -All $true
+    $Collection = $Collection.Where{ (($null -ne $_.KeyCredentials.EndDate) -or ($null -ne $_.PasswordCredentials.EndDate )) }
+    $Collection = $Collection.Where{ ( $_.KeyCredentials.EndDate -lt $Threshold ) -or ( $_.PasswordCredentials.EndDate -lt $Threshold ) }
+
+
+    $Certificate = $Collection.Where{ ( $_.KeyCredentials.EndDate -lt $Threshold ) }
+    Write-Output ("{0}{1} {2}" -f $([Char]9), "[ Certitificates ]", $Certificate.Count)
+
+    $Secret = $Collection.Where{ ($null -ne $_.PasswordCredentials.EndDate ) }
+    $Secret = $Secret.Where{ ( $_.PasswordCredentials.EndDate -lt $Threshold ) }
+    Write-Output ("{0}{1} {2}" -f $([Char]9), "[ Secrets ]", $Secret.Count)
+} catch {
+    { 1:<#Do this if a terminating exception happens#> }
+}
+
+
+# Counters: -------------------------------------------------------------------
+[int]$CounterTotal = $Collection.Count
+[int]$CounterErrors = 0
+
+# ACTION: #####################################################################
+
+foreach ($item in $Collection) {
+    $OutputObject = [PSCustomObject][Ordered]@{
+        Name        = $item.DisplayName
+        Id          = $item.ObjectID
+        Certificate = ($item.KeyCredentials.EndDate -lt $Now) ? "Expired" : "Expiring $(item.KeyCredentials.EndDate)"
+        Secret      = ($item.KeyCredentials.EndDate -lt $Now) ? "Expired" : "Expiring $(item.KeyCredentials.EndDate)"
+
+    }
+
+    # Write-Output ("{0}{1} {2}" -f $([Char]9), "[ $($item.Name) ]", $Status)
+
+    $OutputObject
+}
+
+$([Char]13)
+Write-Output "[ END   ] ########################################"
+$EndObject = [PSCustomObject][Ordered]@{
+    Action    = $Action
+    Processed = $CounterTotal
+    Errors    = $CounterErrors
+    Duration  = "{0:d2}:{1:d2}:{2:d2}" -f $StopWatch.Elapsed.Hours, $StopWatch.Elapsed.Minutes, $StopWatch.Elapsed.Seconds
+}
+
+Write-Output $EndObject
+$StopWatch.Stop()
